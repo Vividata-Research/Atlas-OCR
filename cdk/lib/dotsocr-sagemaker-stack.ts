@@ -7,11 +7,11 @@ import * as path from "path";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 
 interface StackDependencyList {
-  modelBucketName: string;
-  dotsOcrModelName: string;
-  dotsOcrS3Key: string;
-  inputBucketName: string;
-  outputBucketName: string;
+  modelBucketName: string;     // bucket that stores DotsOCR.tar.gz
+  dotsOcrModelName: string;    // logical name you want to give the SageMaker Model
+  dotsOcrS3Key: string;        // e.g. "models/DotsOCR.tar.gz"
+  inputBucketName: string;     // batch input docs (pdf/image or JSONL)
+  outputBucketName: string;    // batch outputs (json/md files)
 }
 
 interface Config extends cdk.StackProps {
@@ -59,14 +59,14 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     });
 
     // ────────────────────────────────────────────────────────────
-    // SageMaker execution role
+    // SageMaker execution role (used BY the container at runtime)
     // ────────────────────────────────────────────────────────────
     const modelRole = new iam.Role(this, "DotsOcrModelRole", {
       assumedBy: new iam.ServicePrincipal("sagemaker.amazonaws.com"),
       inlinePolicies: {
         DotsOcrPermissions: new iam.PolicyDocument({
           statements: [
-            // Pull image from ECR
+            // Pull from ECR
             new iam.PolicyStatement({
               actions: [
                 "ecr:GetAuthorizationToken",
@@ -76,17 +76,14 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
               ],
               resources: ["*"],
             }),
-            // Read model tar + (optionally) write outputs
+            // Read the weights tarball (ModelDataUrl)
             new iam.PolicyStatement({
               actions: ["s3:GetObject", "s3:ListBucket"],
-              resources: [
-                modelBucket.bucketArn,
-                `${modelBucket.bucketArn}/*`,
-              ],
+              resources: [modelBucket.bucketArn, `${modelBucket.bucketArn}/*`],
             }),
-            // Input & output doc buckets (adjust as you like)
+            // Read batch inputs + write batch outputs
             new iam.PolicyStatement({
-              actions: ["s3:PutObject", "s3:GetObject", "s3:ListBucket", "s3:DeleteObject"],
+              actions: ["s3:GetObject", "s3:ListBucket", "s3:PutObject", "s3:DeleteObject"],
               resources: [
                 inputBucket.bucketArn,
                 `${inputBucket.bucketArn}/*`,
@@ -94,7 +91,7 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
                 `${outputBucket.bucketArn}/*`,
               ],
             }),
-            // CloudWatch logs
+            // Logs
             new iam.PolicyStatement({
               actions: [
                 "logs:CreateLogGroup",
@@ -110,17 +107,18 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
       },
     });
 
-    // Allow the role to pull this specific image
+    // allow pulling this image
     imageAsset.repository.grantPull(modelRole);
 
     // ────────────────────────────────────────────────────────────
     // SageMaker Model (weights via ModelDataUrl → /opt/ml/model)
     // ────────────────────────────────────────────────────────────
     const model = new sagemaker.CfnModel(this, "DotsOcrModel", {
+      modelName: props.dependencies.dotsOcrModelName,
       executionRoleArn: modelRole.roleArn,
       primaryContainer: {
         image: imageAsset.imageUri,
-        // SageMaker extracts s3://.../DotsOCR.tar.gz into /opt/ml/model/
+        // SageMaker extracts this tar.gz into /opt/ml/model/
         modelDataUrl: `s3://${props.dependencies.modelBucketName}/${props.dependencies.dotsOcrS3Key}`,
         environment: {
           // vLLM + app expect weights at /opt/ml/model/DotsOCR
@@ -132,37 +130,17 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
           PYTHONUNBUFFERED: "1",
         },
       },
-      modelName: props.dependencies.dotsOcrModelName,
     });
 
-    // ────────────────────────────────────────────────────────────
-    // Endpoint config + endpoint (real-time)
-    // ────────────────────────────────────────────────────────────
-    const endpointConfig = new sagemaker.CfnEndpointConfig(this, "DotsOcrEndpointConfig", {
-      productionVariants: [
-        {
-          modelName: model.attrModelName,
-          variantName: "primary",
-          initialInstanceCount: 1,
-          // pick a GPU SKU available in your region
-          instanceType: "ml.g4dn.xlarge",
-          initialVariantWeight: 1,
-        },
-      ],
-    });
-
-    const endpoint = new sagemaker.CfnEndpoint(this, "DotsOcrEndpoint", {
-      endpointConfigName: endpointConfig.attrEndpointConfigName,
-    });
+    // NOTE: No Endpoint / EndpointConfig here — this stack is BATCH-ONLY.
 
     // ────────────────────────────────────────────────────────────
     // Outputs
     // ────────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, "ModelName", { value: model.attrModelName });
-    new cdk.CfnOutput(this, "EndpointName", { value: endpoint.attrEndpointName });
+    new cdk.CfnOutput(this, "DockerImageUri", { value: imageAsset.imageUri });
     new cdk.CfnOutput(this, "ModelBucketName", { value: modelBucket.bucketName });
     new cdk.CfnOutput(this, "InputBucketName", { value: inputBucket.bucketName });
     new cdk.CfnOutput(this, "OutputBucketName", { value: outputBucket.bucketName });
-    new cdk.CfnOutput(this, "DockerImageUri", { value: imageAsset.imageUri });
   }
 }

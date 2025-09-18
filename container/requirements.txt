@@ -1,0 +1,10 @@
+flask
+uvicorn[standard]
+asgiref
+pydantic<3
+huggingface_hub>=0.24
+pymupdf
+pillow
+requests
+boto3
+tqdm

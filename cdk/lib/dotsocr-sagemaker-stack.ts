@@ -54,10 +54,9 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     // Build Docker image from repo root (one level up from cdk/)
     // ────────────────────────────────────────────────────────────
     const imageAsset = new DockerImageAsset(this, "DotsOcrImage", {
-      directory: path.join(__dirname, "../../"), // repo root
+      directory: path.join(__dirname, "../../container"), // ⬅️ point to container/
       platform: Platform.LINUX_AMD64,
     });
-
     // ────────────────────────────────────────────────────────────
     // SageMaker execution role (used BY the container at runtime)
     // ────────────────────────────────────────────────────────────

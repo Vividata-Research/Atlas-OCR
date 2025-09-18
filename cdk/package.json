@@ -1,25 +1,25 @@
 {
-    "name": "dotsocr-cdk",
-    "version": "1.0.0",
-    "private": true,
-    "bin": {
-      "dotsocr-cdk": "bin/app.ts"
-    },
-    "scripts": {
-      "build": "tsc",
-      "watch": "tsc -w",
-      "synth": "npm run build && cdk synth",
-      "deploy": "npm run build && cdk deploy",
-      "diff": "npm run build && cdk diff",
-      "bootstrap": "cdk bootstrap",
-      "clean": "rm -rf dist"
-    },
-    "devDependencies": {
-      "aws-cdk-lib": "^2.151.0",
-      "constructs": "^10.3.0",
-      "ts-node": "^10.9.2",
-      "typescript": "^5.4.0",
-      "@types/node": "^20.11.19"
-    }
+  "name": "dotsocr-cdk",
+  "version": "1.0.0",
+  "private": true,
+  "bin": {
+    "dotsocr-cdk": "bin/app.ts"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "synth": "pnpm run build && cdk synth",
+    "deploy": "pnpm run build && cdk deploy",
+    "diff": "pnpm run build && cdk diff",
+    "bootstrap": "npx cdk bootstrap",
+    "clean": "rm -rf dist"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.19",
+    "aws-cdk": "^2.1029.2",
+    "aws-cdk-lib": "^2.151.0",
+    "constructs": "^10.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.0"
   }
-  
+}

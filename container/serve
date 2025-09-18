@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
 echo "[serve] starting DotsOCR (parser-backed)…"
-/app/start_vLLM.sh &
+/app/start_vllm.sh &
 sleep 5
 uvicorn 'main:asgi_app' --host 0.0.0.0 --port 8080 --workers 1 --log-level info --access-log

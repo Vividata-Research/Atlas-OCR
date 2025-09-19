@@ -16,17 +16,21 @@ ENV MODEL_PATH=/opt/ml/model/DotsOCR \
     GPU_MEMORY_UTILIZATION=0.95
 
 # Ensure vLLM can import any custom code shipped inside MODEL_PATH when --trust-remote-code is used
-ENV PYTHONPATH=/opt/ml/model:${PYTHONPATH}
+ENV PYTHONPATH=/opt/ml/model:${PYTHONPATH:-}
 
 WORKDIR /app
 
 # Disable pip build isolation globally (so flash-attn sees torch)
 ENV PIP_NO_BUILD_ISOLATION=1
+ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
 # --- Python deps for the server façade + pins you wanted ---
 COPY requirements.txt /app/requirements.txt
-RUN pip install --upgrade pip \
- && pip install --no-cache-dir -r /app/requirements.txt
+RUN pip install --upgrade pip
+RUN python3 -m pip install --no-cache-dir \
+    --ignore-installed --no-deps --force-reinstall \
+    "blinker==1.9.0"
+RUN pip install --no-cache-dir -r /app/requirements.txt
 
 # --- App files (your façade/launcher scripts) ---
 COPY main.py /app/

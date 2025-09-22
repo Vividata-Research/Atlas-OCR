@@ -9,7 +9,7 @@ import { createDotsOcrBatchStateMachine } from "../helpers/dotsOcrBatch";
 
 interface StackDependencyList {
   modelBucketName: string;     // bucket that stores DotsOCR.tar.gz
-  dotsOcrModelName: string;    // logical name you want to give the SageMaker Model
+  modelName: string;           // logical name you want to give the SageMaker Model
   dotsOcrS3Key: string;        // e.g. "models/DotsOCR.tar.gz"
   inputBucketName: string;     // batch input docs (pdf/image or JSONL)
   outputBucketName: string;    // batch outputs (json/md files)
@@ -114,7 +114,6 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     // SageMaker Model (weights via ModelDataUrl → /opt/ml/model)
     // ────────────────────────────────────────────────────────────
     const model = new sagemaker.CfnModel(this, "DotsOcrModel", {
-      modelName: props.dependencies.dotsOcrModelName,
       executionRoleArn: modelRole.roleArn,
       primaryContainer: {
         image: imageAsset.imageUri,
@@ -138,7 +137,7 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
       modelName: model.attrModelName,
       inputBucket: inputBucket.bucketName,
       outputBucket: outputBucket.bucketName,
-      jobNameBase: props.dependencies.dotsOcrModelName, 
+      jobNameBase: props.dependencies.modelName, 
     });
 
     // ────────────────────────────────────────────────────────────

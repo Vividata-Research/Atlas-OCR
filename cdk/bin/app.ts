@@ -9,7 +9,7 @@ const config = {
   dependencies: {
     // Must be globally unique if you keep explicit names
     modelBucketName: "dotsocr-models-bucket",
-    dotsOcrModelName: "DotsOCR",
+    modelName: "DotsOCR",
     dotsOcrS3Key: "models/DotsOCR.tar.gz",
     inputBucketName: "dotsocr-input-documents",
     outputBucketName: "dotsocr-processed-results",

@@ -5,39 +5,50 @@ import * as ec2 from "aws-cdk-lib/aws-ec2";
 import { Construct } from "constructs";
 import { Duration } from "aws-cdk-lib";
 
-// Version tag for job names
+// Version for tracking deployments - increment when making breaking changes
 export const DEPLOYMENT_VERSION = "v1";
 
-// Defaults if the execution input omits fields.
-// input_prefix/output_prefix are *prefixes inside the buckets* passed by the stack.
+// Default identifiers (used when the state machine is executed without explicit input)
 export const DEFAULT_PARAMS = {
-  instance_type: "ml.g5.xlarge",
-  input_prefix: "incoming/",          // e.g. put PDFs at s3://dotsocr-input-documents/incoming/...
-  output_prefix: "processed/runs/1/", // results at s3://dotsocr-processed-results/processed/runs/1/...
+  instance_type: "ml.g5.xlarge",     // default GPU
+  input_prefix: "incoming/",          // s3://<input-bucket>/incoming/...
+  output_prefix: "processed/runs/1/", // s3://<output-bucket>/processed/runs/1/...
 } as const;
 
-/** Build a unique transform job name (<= ~63 chars is safe) */
-export const buildTransformJobName = (base: string) =>
+export interface RetryLogicResult {
+  initRetryCounter: sfn.Pass;
+  prepareBatchInput: sfn.Pass;
+  batchTask: tasks.SageMakerCreateTransformJob;
+}
+
+/** Helper to build transform-job names (unique, concise) */
+export const buildTransformJobName = (truncatedBase: string, suffix = "bt") =>
   sfn.JsonPath.format(
-    "{}-ocr-{}-{}",
-    base.substring(0, 20),
-    DEPLOYMENT_VERSION,
+    `${truncatedBase}-${suffix}-${DEPLOYMENT_VERSION}-{}-{}`,
     sfn.JsonPath.stringAt("$$.Execution.Name"),
+    sfn.JsonPath.stringAt("$.retryCount"),
   );
 
-/** Retry logic for capacity/throttling with explicit counter management (unchanged) */
+/** Same retry loop you use elsewhere (capacity/throttling) */
 export const createRetryLogic = (
   scope: Construct,
   idPrefix: string,
   batchTask: tasks.SageMakerCreateTransformJob
-) => {
+): RetryLogicResult => {
+  // NOTE: mirror your working code: copy the WHOLE state to $.input here
   const initRetryCounter = new sfn.Pass(scope, `${idPrefix}InitRetryCounter`, {
-    parameters: { retryCount: 0, "input.$": "$" },
+    parameters: {
+      retryCount: 0,
+      "input.$": "$",
+    },
     resultPath: "$",
   });
 
   const incrementRetry = new sfn.Pass(scope, `${idPrefix}IncrementRetry`, {
-    parameters: { "retryCount.$": "States.MathAdd($.retryCount, 1)", "input.$": "$.input" },
+    parameters: {
+      "retryCount.$": "States.MathAdd($.retryCount, 1)",
+      "input.$": "$.input",
+    },
     resultPath: "$",
   });
 
@@ -56,19 +67,14 @@ export const createRetryLogic = (
 
   const retryChain = incrementRetry.next(checkRetryLimit);
 
-  // Parse JSON-ish error Causes when available
-  const parseErrorCause = new sfn.Pass(scope, `${idPrefix}ParseErrorCause`, {
-    parameters: {
-      "Error.$": "$.cause.Error",
-      "Cause.$": "$.cause.Cause",
-      "Parsed.$": "States.StringToJson($.cause.Cause)",
-    },
-    resultPath: "$.cause",
-  });
-
   const nonCapacityFailParsed = new sfn.Fail(scope, `${idPrefix}NonCapacityFailureParsed`, {
     error: "NonCapacityFailure",
     causePath: sfn.JsonPath.stringAt("$.cause.Parsed.FailureReason"),
+  });
+
+  const nonCapacityFailString = new sfn.Fail(scope, `${idPrefix}NonCapacityFailureString`, {
+    error: "NonCapacityFailure",
+    causePath: sfn.JsonPath.stringAt("$.cause.Cause"),
   });
 
   const failureReasonUnknown = new sfn.Fail(scope, `${idPrefix}FailureReasonUnknown`, {
@@ -80,17 +86,18 @@ export const createRetryLogic = (
     .when(sfn.Condition.isNull("$.cause.Parsed.FailureReason"), failureReasonUnknown)
     .otherwise(nonCapacityFailParsed);
 
-  const checkCapacityError = new sfn.Choice(scope, `${idPrefix}CheckCapacityError`)
-    .when(
-      sfn.Condition.stringMatches("$.cause.Parsed.FailureReason", "*CapacityError*"),
-      retryChain
-    )
-    .otherwise(checkFailureReasonPresent);
-
-  const nonCapacityFailString = new sfn.Fail(scope, `${idPrefix}NonCapacityFailureString`, {
-    error: "NonCapacityFailure",
-    causePath: sfn.JsonPath.stringAt("$.cause.Cause"),
+  const parseErrorCause = new sfn.Pass(scope, `${idPrefix}ParseErrorCause`, {
+    parameters: {
+      "Error.$": "$.cause.Error",
+      "Cause.$": "$.cause.Cause",
+      "Parsed.$": "States.StringToJson($.cause.Cause)",
+    },
+    resultPath: "$.cause",
   });
+
+  const checkCapacityError = new sfn.Choice(scope, `${idPrefix}CheckCapacityError`)
+    .when(sfn.Condition.stringMatches("$.cause.Parsed.FailureReason", "*CapacityError*"), retryChain)
+    .otherwise(checkFailureReasonPresent);
 
   const checkThrottling = new sfn.Choice(scope, `${idPrefix}CheckThrottling`)
     .when(sfn.Condition.stringMatches("$.cause.Cause", "*ThrottlingException*"), retryChain)
@@ -100,7 +107,7 @@ export const createRetryLogic = (
     .when(sfn.Condition.stringMatches("$.cause.Cause", "{*"), parseErrorCause)
     .otherwise(checkThrottling);
 
-  // Prepare flattened input for the task
+  // Prepare flattened input for the transform-job task
   const prepareBatchInput = new sfn.Pass(scope, `${idPrefix}PrepareBatchInput`, {
     parameters: {
       "instance_type.$": "$.input.instance_type",
@@ -117,34 +124,24 @@ export const createRetryLogic = (
     resultPath: "$.cause",
   });
 
-  waitBeforeRetry.next(prepareBatchInput);
   parseErrorCause.next(checkCapacityError);
+  waitBeforeRetry.next(prepareBatchInput);
 
   return { initRetryCounter, prepareBatchInput, batchTask };
 };
 
 export interface DotsOcrBatchProps {
-  /** The SageMaker *Model* name to use for transform jobs (model.attrModelName) */
-  modelName: string;
-  /** S3 bucket names for IO (stack passes these in) */
-  inputBucket: string;
-  outputBucket: string;
-  /** Base name used in transformJobName */
-  jobNameBase?: string; // defaults to modelName
+  modelName: string;   // SageMaker model to use
+  inputBucket: string; // where PDFs/images live
+  outputBucket: string; // where JSON results go
+  jobNameBase?: string;
 }
 
 /**
- * Batch Transform for PDFs/images (binary):
- *  - Reads each object under `s3://inputBucket/input_prefix/` as a single request (splitType=None)
- *  - Posts raw bytes to your container's /invocations
- *  - Writes one JSON result per object under `s3://outputBucket/output_prefix/`
- *
- * Execution input example:
- * {
- *   "input_prefix":  "incoming/company_id=123/job_id=abc/",
- *   "output_prefix": "processed/company_id=123/job_id=abc/",
- *   "instance_type": "ml.g5.xlarge"
- * }
+ * DotsOCR Batch Transform (binary objects):
+ *  - Reads each S3 object under input_prefix (no splitting)
+ *  - Sends raw bytes to /invocations
+ *  - Writes one JSON per input object under output_prefix
  */
 export const createDotsOcrBatchStateMachine = (
   scope: Construct,
@@ -153,34 +150,34 @@ export const createDotsOcrBatchStateMachine = (
 ): sfn.StateMachine => {
   const { modelName, inputBucket, outputBucket, jobNameBase = modelName } = props;
 
-  // Inject defaults -> $.defaults
+  // 1) Inject defaults
   const injectDefaults = new sfn.Pass(scope, `${id}InjectDefaults`, {
     result: sfn.Result.fromObject(DEFAULT_PARAMS),
     resultPath: "$.defaults",
   });
 
-  // Merge caller input with defaults -> $.merged
+  // 2) Merge caller input with defaults
   const mergeParams = new sfn.Pass(scope, `${id}MergeParams`, {
     parameters: { "merged.$": "States.JsonMerge($.defaults, $, false)" },
     resultPath: "$",
   });
 
-  // Select final params -> $.input
+  // 3) Match your tested pattern: put resolved params at the TOP LEVEL
   const selectParams = new sfn.Pass(scope, `${id}SelectParams`, {
     parameters: {
-      "input.instance_type.$": "$.merged.instance_type",
-      "input.input_prefix.$": "$.merged.input_prefix",
-      "input.output_prefix.$": "$.merged.output_prefix",
+      "instance_type.$": "$.merged.instance_type",
+      "input_prefix.$": "$.merged.input_prefix",
+      "output_prefix.$": "$.merged.output_prefix",
     },
     resultPath: "$",
   });
 
-  // Batch Transform task configured for *binary* objects (PDF/image)
+  // 4) Batch Transform (binary)
   const batchTask = new tasks.SageMakerCreateTransformJob(scope, `${id}Transform`, {
-    transformJobName: buildTransformJobName(jobNameBase),
+    transformJobName: buildTransformJobName(jobNameBase, "dots"),
     modelName,
     integrationPattern: sfn.IntegrationPattern.RUN_JOB,
-    batchStrategy: tasks.BatchStrategy.SINGLE_RECORD, // fine; not used with splitType=None
+    batchStrategy: tasks.BatchStrategy.SINGLE_RECORD, // not used with NONE, but ok
     transformInput: {
       transformDataSource: {
         s3DataSource: {
@@ -188,13 +185,12 @@ export const createDotsOcrBatchStateMachine = (
           s3Uri: sfn.JsonPath.format(
             "s3://{}/{}",
             inputBucket,
-            sfn.JsonPath.stringAt("$.input.input_prefix")
+            sfn.JsonPath.stringAt("$.input.input_prefix") // after initRetryCounter -> $.input.*
           ),
         },
       },
-      // IMPORTANT for PDFs/images:
-      contentType: "application/octet-stream", // allows PDF/JPG/PNG/etc.; container detects type
-      splitType: tasks.SplitType.NONE,         // one object -> one request
+      contentType: "application/octet-stream", // PDFs/images as raw bytes
+      splitType: tasks.SplitType.NONE,         // one object = one request
     },
     transformOutput: {
       s3OutputPath: sfn.JsonPath.format(
@@ -210,14 +206,16 @@ export const createDotsOcrBatchStateMachine = (
     },
   });
 
+  // 5) Same retry block you use elsewhere
   const retry = createRetryLogic(scope, `${id}`, batchTask);
 
+  // Definition
   return new sfn.StateMachine(scope, `${id}StateMachine`, {
     definition: injectDefaults
       .next(mergeParams)
       .next(selectParams)
-      .next(retry.initRetryCounter)
-      .next(retry.prepareBatchInput)
+      .next(retry.initRetryCounter)  // copies WHOLE state to $.input (your pattern)
+      .next(retry.prepareBatchInput) // flattens to the shape the task expects
       .next(retry.batchTask),
     timeout: Duration.hours(2),
   });

@@ -5,7 +5,6 @@ from flask import Flask, jsonify, request, Response
 import urllib.parse
 import requests
 import time
-import json
 import os
 import base64
 import tempfile
@@ -15,8 +14,12 @@ app = Flask(__name__)
 
 # ---- CLI flags (optional) ----
 parser = argparse.ArgumentParser(description="DotsOCR vLLM API Server (SageMaker-managed)")
-parser.add_argument("--vllm-api", type=str, default="http://127.0.0.1:8081",
-                    help="Address of vLLM server (health & parser host/port)")
+parser.add_argument(
+    "--vllm-api",
+    type=str,
+    default="http://127.0.0.1:8081",
+    help="Address of vLLM server (health & parser host/port)",
+)
 parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind address")
 parser.add_argument("--port", type=int, default=8080, help="Bind port")
 args, _ = parser.parse_known_args()
@@ -45,8 +48,10 @@ def health() -> Response:
         return jsonify({"status": "unhealthy", "error": str(e)}), 503
     return jsonify({"status": "unhealthy", "vllm": "not ready"}), 503
 
-# ---- Inference ----
+
+# ---- Helpers ----
 def _suffix_for_bytes(b: bytes) -> str:
+    """Guess a file suffix from magic bytes (fallback .pdf)."""
     try:
         if b.startswith(b"%PDF-"): return ".pdf"
         if b[:2] == b"\xFF\xD8":   return ".jpg"
@@ -56,43 +61,77 @@ def _suffix_for_bytes(b: bytes) -> str:
         pass
     return ".pdf"
 
-@app.post("/invocations")
-def invocations():
-    body = request.get_json(silent=True)
-    if not body:
-        return jsonify({"error": "Invalid JSON"}), 400
-    if "file_data" not in body:
-        return jsonify({"error": "Missing 'file_data' (base64 PDF or image)"}), 400
-
-    # Decode and save to a temp file
-    try:
-        raw = base64.b64decode(body["file_data"]) if isinstance(body["file_data"], str) else body["file_data"]
-    except Exception:
-        return jsonify({"error": "file_data must be base64 string"}), 400
-
+def _save_temp_file(raw: bytes) -> str:
     suffix = _suffix_for_bytes(raw)
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
-        f.write(raw)
-        src_path = f.name
+    f = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+    f.write(raw)
+    f.flush()
+    f.close()
+    return f.name
 
-    # Parser config mirrors the CLI
+def _default_options():
     parsed = urllib.parse.urlparse(args.vllm_api)
     ip = parsed.hostname or "127.0.0.1"
     port = parsed.port or 8081
-
-    options = {
+    return {
         "ip": ip,
         "port": port,
         "model_name": "model",
-        "prompt": body.get("prompt", "prompt_layout_all_en"),
-        "dpi": int(body.get("dpi", 120)),
-        "num_thread": int(body.get("num_threads", 1)),
-        "temperature": float(body.get("temperature", 0.1)),
-        "top_p": float(body.get("top_p", 0.9)),
-        "max_completion_tokens": int(body.get("max_tokens", 4096)),
-        # add flags as needed: "no_fitz_preprocess", "min_pixels", "max_pixels", etc.
+        "prompt": "prompt_layout_all_en",
+        "dpi": 120,
+        "num_thread": 1,
+        "temperature": 0.1,
+        "top_p": 0.9,
+        "max_completion_tokens": 4096,
     }
 
+
+# ---- Inference ----
+@app.post("/invocations")
+def invocations():
+    """
+    Accepts either:
+      1) JSON: {"file_data": "<base64>", "prompt": "...", ...}
+         Content-Type: application/json
+      2) Raw bytes (PDF/JPG/PNG/TIFF):
+         Content-Type: application/octet-stream (or application/pdf, image/*)
+    """
+    ct = (request.headers.get("Content-Type") or "").lower().split(";")[0].strip()
+
+    # Prepare options (allow JSON to override defaults)
+    options = _default_options()
+
+    # Mode 1: JSON with base64
+    if ct == "application/json":
+        body = request.get_json(silent=True)
+        if not body:
+            return jsonify({"error": "Invalid JSON"}), 400
+        if "file_data" not in body:
+            return jsonify({"error": "Missing 'file_data' (base64 PDF or image)"}), 400
+        try:
+            raw = base64.b64decode(body["file_data"]) if isinstance(body["file_data"], str) else body["file_data"]
+        except Exception:
+            return jsonify({"error": "file_data must be base64 string"}), 400
+
+        # Optional overrides from JSON
+        if "prompt" in body: options["prompt"] = str(body.get("prompt"))
+        if "dpi" in body: options["dpi"] = int(body.get("dpi"))
+        if "num_threads" in body: options["num_thread"] = int(body.get("num_threads"))
+        if "temperature" in body: options["temperature"] = float(body.get("temperature"))
+        if "top_p" in body: options["top_p"] = float(body.get("top_p"))
+        if "max_tokens" in body: options["max_completion_tokens"] = int(body.get("max_tokens"))
+
+    # Mode 2: raw bytes (Batch Transform with splitType=None)
+    else:
+        raw = request.get_data(cache=False, as_text=False)
+        if not raw:
+            return jsonify({"error": "Empty request body"}), 400
+        # You could also allow header-based overrides for BT, e.g.:
+        #   X-DotsOCR-Prompt, X-DotsOCR-DPI, etc. (optional)
+        # For now we stick to defaults.
+
+    # Write to temp file and run the parser
+    src_path = _save_temp_file(raw)
     try:
         result = process_document(src_path, options)
         return jsonify({
@@ -103,6 +142,12 @@ def invocations():
         })
     except Exception as e:
         return jsonify({"error": f"OCR failed: {e}"}), 500
+    finally:
+        try:
+            os.unlink(src_path)
+        except Exception:
+            pass
+
 
 # ---- ASGI wrapper for uvicorn (serve script) ----
 asgi_app = WsgiToAsgi(app)

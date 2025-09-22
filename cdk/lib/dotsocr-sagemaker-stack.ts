@@ -5,6 +5,7 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
 import * as path from "path";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
+import { createDotsOcrBatchStateMachine } from "../helpers/dotsOcrBatch";
 
 interface StackDependencyList {
   modelBucketName: string;     // bucket that stores DotsOCR.tar.gz
@@ -132,6 +133,14 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     });
 
 
+    // Build the Step Functions state machine that runs Batch Transform on this model
+    const batchSm = createDotsOcrBatchStateMachine(this, "DotsOcrBatch", {
+      modelName: model.attrModelName,
+      inputBucket: inputBucket.bucketName,
+      outputBucket: outputBucket.bucketName,
+      jobNameBase: props.dependencies.dotsOcrModelName, 
+    });
+
     // ────────────────────────────────────────────────────────────
     // Outputs
     // ────────────────────────────────────────────────────────────
@@ -140,5 +149,6 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ModelBucketName", { value: modelBucket.bucketName });
     new cdk.CfnOutput(this, "InputBucketName", { value: inputBucket.bucketName });
     new cdk.CfnOutput(this, "OutputBucketName", { value: outputBucket.bucketName });
+    new cdk.CfnOutput(this, "DotsOcrBatchStateMachineArn", {value: batchSm.stateMachineArn});
   }
 }

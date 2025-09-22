@@ -54,7 +54,7 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     // Build Docker image from repo root (one level up from cdk/)
     // ────────────────────────────────────────────────────────────
     const imageAsset = new DockerImageAsset(this, "DotsOcrImage", {
-      directory: path.join(__dirname, "../../container"), // ⬅️ point to container/
+      directory: path.join(__dirname, "../../container"), 
       platform: Platform.LINUX_AMD64,
     });
     // ────────────────────────────────────────────────────────────
@@ -131,7 +131,6 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
       },
     });
 
-    // NOTE: No Endpoint / EndpointConfig here — this stack is BATCH-ONLY.
 
     // ────────────────────────────────────────────────────────────
     // Outputs

@@ -16,6 +16,14 @@ jobs:
       group: dotsocr-deploy-${{ github.ref }}
       cancel-in-progress: true
 
+    env:
+      AWS_REGION: eu-west-2
+      # 🔧 Adjust if your Dockerfile/context are elsewhere
+      ECR_REPOSITORY: dotsocr
+      DOCKERFILE: container/Dockerfile
+      BUILD_CONTEXT: container
+      DOCKER_BUILDKIT: 1
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,17 +38,40 @@ jobs:
         with:
           version: 10
 
+      # ✅ Buildx for caching/remote cache support
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       # 🔐 Assume your OIDC role (no static secrets needed)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: arn:aws:iam::597088029880:role/GitHubActionsRole
-          aws-region: eu-west-2
+          aws-region: ${{ env.AWS_REGION }}
           audience: sts.amazonaws.com
           role-session-name: gha-${{ github.run_id }}
 
       - name: Who am I (sanity)
         run: aws sts get-caller-identity
+
+      # 🔑 Log in to Amazon ECR
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # 🧱 Build & push Docker image with cache (explicit, like your other workflow)
+      - name: Build & push image to ECR (cached)
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./${{ env.BUILD_CONTEXT }}
+          file: ${{ env.DOCKERFILE }}
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=gha,scope=dotsocr
+          cache-to: type=gha,mode=max,scope=dotsocr
+          provenance: false
+          outputs: type=registry,push=true
 
       # Check to ensure local dependency is present
       - name: Verify DotsOCR source is vendored
@@ -63,19 +94,16 @@ jobs:
       - name: Bootstrap CDK
         working-directory: ./cdk
         env:
-          AWS_REGION: eu-west-2
+          AWS_REGION: ${{ env.AWS_REGION }}
         run: |
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           npx cdk bootstrap aws://$ACCOUNT_ID/$AWS_REGION || true
 
-      #  This deploy will:
-      # - Build/publish the container image to ECR using CDK's ImageAsset
-      # - Upload any file assets to S3
-      # - Deploy/Update your stack
+      # 🚀 Deploy stack (unchanged: CDK still builds its Docker asset today)
       - name: Deploy stack
         working-directory: ./cdk
         env:
-          CDK_DEFAULT_REGION: eu-west-2
+          CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
         run: |
           npx cdk deploy DotsOcrSagemakerStack --require-approval never --verbose
 
@@ -83,6 +111,6 @@ jobs:
         run: |
           aws cloudformation describe-stacks \
             --stack-name DotsOcrSagemakerStack \
-            --region eu-west-2 \
+            --region ${{ env.AWS_REGION }} \
             --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
             --output table || true

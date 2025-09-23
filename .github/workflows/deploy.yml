@@ -46,12 +46,12 @@ jobs:
       - name: Who am I (sanity)
         run: aws sts get-caller-identity
 
-      # ⚡ Buildx so CDK can use BuildKit cache, plus ECR auth for asset & cache repos
-      # - name: Set up Docker Buildx
-      #   uses: docker/setup-buildx-action@v3
+      #⚡ Buildx so CDK can use BuildKit cache, plus ECR auth for asset & cache repos
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      # - name: Log in to Amazon ECR
-      #   uses: aws-actions/amazon-ecr-login@v2
+      - name: Log in to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
 
       # # Optional: reclaim space to avoid ENOSPC during big builds
       # - name: Free disk space (fast)

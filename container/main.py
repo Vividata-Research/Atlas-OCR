@@ -50,7 +50,7 @@ def health() -> Response:
             return jsonify({"status": "healthy", "vllm": "ready"})
     except Exception as e:
         return jsonify({"status": "unhealthy", "error": str(e)}), 503
-    return jsonify({"status": "unhealthy", "vllm": "not ready"}), 503
+    return jsonify({"status": "unhealthy", "vllm": "not ready."}), 503
 
 
 # ---- Helpers ----

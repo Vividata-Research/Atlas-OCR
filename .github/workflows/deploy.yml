@@ -18,6 +18,7 @@ jobs:
 
     env:
       AWS_REGION: eu-west-2
+      ECR_REPOSITORY: dotsocr
       DOCKER_BUILDKIT: 1
 
     steps:
@@ -43,24 +44,54 @@ jobs:
           audience: sts.amazonaws.com
           role-session-name: gha-${{ github.run_id }}
 
-      - name: Who am I (sanity)
-        run: aws sts get-caller-identity
+      - name: Who am I (sanity + export account ID)
+        id: aws_identity
+        run: |
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
+          echo "✅ Running as $ACCOUNT_ID"
 
-      #⚡ Buildx so CDK can use BuildKit cache, plus ECR auth for asset & cache repos
+      # ⚡ Buildx so caching works
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      # # Optional: reclaim space to avoid ENOSPC during big builds
-      # - name: Free disk space (fast)
-      #   run: |
-      #     mkdir -p /tmp/empty
-      #     sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
-      #     sudo rsync -a --delete /tmp/empty/ /usr/share/dotnet/ || true
-      #     df -h
-      #     docker system df || true
+      - name: Ensure ECR repo exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
+
+      # Optional: reclaim space to avoid ENOSPC during big builds
+      - name: Free disk space (fast)
+        run: |
+          mkdir -p /tmp/empty
+          sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
+          sudo rsync -a --delete /tmp/empty/ /usr/share/dotnet/ || true
+          df -h
+          docker system df || true
+
+      # Build & push the Docker image explicitly
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./container
+          file: ./container/Dockerfile
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:cache
+          cache-to: type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:cache,mode=max,compression=zstd
+
+      - name: Export image URI (digest)
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${DIGEST}"
+          echo "DOCKER_IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+          echo "📌 Using immutable image $IMAGE"
 
       - name: Verify DotsOCR source is vendored
         run: |
@@ -78,20 +109,18 @@ jobs:
         working-directory: ./cdk
         run: pnpm run build
 
-      # Safe to run every time; creates/updates the CDK bootstrap stack
       - name: Bootstrap CDK
         working-directory: ./cdk
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          npx cdk bootstrap aws://$ACCOUNT_ID/$AWS_REGION || true
+          npx cdk bootstrap aws://$AWS_ACCOUNT_ID/$AWS_REGION || true
 
-      # CDK will build the DockerImageAsset, using ECR-backed cache from the stack config
-      - name: Deploy stack (CDK builds & pushes image)
+      - name: Deploy stack (CDK uses prebuilt image)
         working-directory: ./cdk
         env:
           CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          DOCKER_IMAGE_URI: ${{ env.DOCKER_IMAGE_URI }}
         run: |
           npx cdk deploy DotsOcrSagemakerStack --require-approval never --verbose
 

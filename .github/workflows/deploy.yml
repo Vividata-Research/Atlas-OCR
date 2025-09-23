@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write   # needed for OIDC
+  id-token: write
   contents: read
 
 jobs:
@@ -18,7 +18,9 @@ jobs:
 
     env:
       AWS_REGION: eu-west-2
+      ECR_REPOSITORY: dotsocr
       DOCKER_BUILDKIT: 1
+      VLLM_TAG: v0.9.1     # 🔁 set the base tag you use
 
     steps:
       - name: Checkout
@@ -34,7 +36,6 @@ jobs:
         with:
           version: 10
 
-      # 🔐 Assume your OIDC role (no static secrets needed)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -43,18 +44,87 @@ jobs:
           audience: sts.amazonaws.com
           role-session-name: gha-${{ github.run_id }}
 
-      - name: Who am I (sanity)
-        run: aws sts get-caller-identity
-
-
-      # Optional: reclaim space to avoid ENOSPC during big builds
-      - name: Free disk space (optional)
+      - name: Who am I (sanity + export account ID)
+        id: aws_identity
         run: |
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/hostedtoolcache || true
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
+          echo "✅ Running as $ACCOUNT_ID"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Ensure app ECR repo exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
+
+      # 🔁 Install Skopeo (CLI for registry-to-registry copy)
+      - name: Install Skopeo
+        uses: redhat-actions/skopeo-tool@v1
+
+      # 🔁 Auto-mirror the vLLM base into your ECR (idempotent)
+      - name: Mirror vLLM base to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.ecr.outputs.registry }}
+          VLLM_TAG: ${{ env.VLLM_TAG }}
+          AWS_REGION: ${{ env.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          ECR_PASS="$(aws ecr get-login-password --region "$AWS_REGION")"
+
+          # Ensure the base-image repo exists (vllm/vllm-openai)
+          aws ecr describe-repositories --repository-names "vllm/vllm-openai" >/dev/null 2>&1 \
+            || aws ecr create-repository --repository-name "vllm/vllm-openai" >/dev/null
+
+          echo "🔁 Copying docker.io/vllm/vllm-openai:${VLLM_TAG} -> ${ECR_REGISTRY}/vllm/vllm-openai:${VLLM_TAG}"
+          skopeo copy --all \
+            docker://docker.io/vllm/vllm-openai:${VLLM_TAG} \
+            docker://$ECR_REGISTRY/vllm/vllm-openai:${VLLM_TAG} \
+            --dest-creds AWS:${ECR_PASS}
+
+          echo "📌 Mirrored digest:"
+          skopeo inspect docker://$ECR_REGISTRY/vllm/vllm-openai:${VLLM_TAG} --creds AWS:${ECR_PASS} | jq -r '.Digest'
+
+      # Optional: reclaim space
+      - name: Free disk space (fast)
+        run: |
+          mkdir -p /tmp/empty
+          sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
+          sudo rsync -a --delete /tmp/empty/ /usr/share/dotnet/ || true
           df -h
           docker system df || true
+
+      # Build & push your app image, using the ECR base + registry cache
+      - name: Build and push Docker image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./container
+          file: ./container/Dockerfile
+          push: true
+          pull: false  
+          provenance: false
+          build-args: |
+            ECR_REGISTRY=${{ steps.ecr.outputs.registry }}   # 🔁 pass to Dockerfile
+            VLLM_TAG=${{ env.VLLM_TAG }}                     # 🔁 pass to Dockerfile
+          tags: |
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+          cache-from: |
+            type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:cache
+            type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+          cache-to: type=registry,ref=${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:cache,mode=max,compression=zstd
+
+      - name: Export image URI (digest)
+        run: |
+          DIGEST="${{ steps.build.outputs.digest }}"
+          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}@${DIGEST}"
+          echo "DOCKER_IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+          echo "📌 Using immutable image $IMAGE"
 
       - name: Verify DotsOCR source is vendored
         run: |
@@ -72,20 +142,18 @@ jobs:
         working-directory: ./cdk
         run: pnpm run build
 
-      # Safe to run every time; creates/updates the CDK bootstrap stack
       - name: Bootstrap CDK
         working-directory: ./cdk
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
         run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          npx cdk bootstrap aws://$ACCOUNT_ID/$AWS_REGION || true
+          npx cdk bootstrap aws://$AWS_ACCOUNT_ID/$AWS_REGION || true
 
-      # CDK will build the DockerImageAsset, using ECR-backed cache from the stack config
-      - name: Deploy stack (CDK builds & pushes image)
+      - name: Deploy stack (CDK uses prebuilt image)
         working-directory: ./cdk
         env:
           CDK_DEFAULT_REGION: ${{ env.AWS_REGION }}
+          DOCKER_IMAGE_URI: ${{ env.DOCKER_IMAGE_URI }}
         run: |
           npx cdk deploy DotsOcrSagemakerStack --require-approval never --verbose
 

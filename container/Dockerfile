@@ -1,5 +1,11 @@
-# Match the project’s guidance (CUDA/Torch/vLLM already aligned)
-FROM vllm/vllm-openai:v0.9.1
+# syntax=docker/dockerfile:1.6
+
+# These come from the workflow
+ARG ECR_REGISTRY
+ARG VLLM_TAG=v0.9.1
+
+# Use the auto-mirrored base in your own ECR
+FROM ${ECR_REGISTRY}/vllm/vllm-openai:${VLLM_TAG}
 
 # Minimal extras (no venv)
 RUN apt-get update && apt-get install -y --no-install-recommends \

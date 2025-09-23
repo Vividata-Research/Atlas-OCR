@@ -79,3 +79,5 @@ checkpoints/
 
 # Git LFS
 .gitattributes
+
+sample.pdf

@@ -1,126 +1,88 @@
-name: 'Deploy DotsOCR to Production'
+name: Deploy DotsOCR (CDK + Assets)
 
 on:
   push:
     branches: [main]
-  workflow_dispatch: # Allow manual triggering
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # needed for OIDC
+  contents: read
 
 jobs:
   deploy:
-    name: Build and Deploy DotsOCR Stack
     runs-on: ubuntu-latest
-    
-    strategy:
-      matrix:
-        node-version: [20.x]
+    concurrency:
+      group: dotsocr-deploy-${{ github.ref }}
+      cancel-in-progress: true
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
-        
-      - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
-          
-      - name: Install pnpm
-        uses: pnpm/action-setup@v2
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
         with:
           version: 8
-          
-      - name: Configure AWS credentials
+
+      # 🔐 Assume your OIDC role (no static secrets needed)
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          role-to-assume: arn:aws:iam::597088029880:role/GitHubActionsRole
           aws-region: eu-west-2
-          
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-        
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-        
-      - name: Verify DotsOCR source code
+          audience: sts.amazonaws.com
+          role-session-name: gha-${{ github.run_id }}
+
+      - name: Who am I (sanity)
+        run: aws sts get-caller-identity
+
+      # Check to ensure local dependency is present
+      - name: Verify DotsOCR source is vendored
         run: |
-          echo "Checking for DotsOCR source code..."
           if [ ! -d "container/third_party/dots.ocr" ]; then
-            echo "❌ DotsOCR source code not found in repository"
-            echo "Please ensure container/third_party/dots.ocr/ directory is included in the repository"
+            echo "❌ Missing container/third_party/dots.ocr (the local repo you install -e)."
             exit 1
           fi
-          echo "✅ DotsOCR source code found"
-          
-      - name: Build Docker image
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: dotsocr-vllm
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          echo "Building Docker image from container/ directory..."
-          cd container
-          docker build --platform linux/amd64 -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
-          docker build --platform linux/amd64 -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-          echo "image-uri=$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> $GITHUB_OUTPUT
-        id: build-image
-        
-      - name: Create ECR repository if it doesn't exist
-        env:
-          ECR_REPOSITORY: dotsocr-vllm
-        run: |
-          aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region eu-west-2 || \
-          aws ecr create-repository --repository-name $ECR_REPOSITORY --region eu-west-2
-          
-      - name: Push Docker image to ECR
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: dotsocr-vllm
-          IMAGE_TAG: ${{ github.sha }}
-        run: |
-          echo "Pushing Docker image to ECR..."
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-          echo "✅ Docker image pushed successfully"
-          
-      - name: Install CDK dependencies
+          echo "✅ Found container/third_party/dots.ocr"
+
+      - name: Install CDK deps
         working-directory: ./cdk
-        run: |
-          echo "Installing CDK dependencies..."
-          pnpm install
-          
-      - name: Build CDK project
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CDK app
         working-directory: ./cdk
-        run: |
-          echo "Building CDK project..."
-          pnpm run build
-          
-      - name: Bootstrap CDK (if needed)
+        run: pnpm run build
+
+      # Safe to run every time; creates/updates the CDK bootstrap stack
+      - name: Bootstrap CDK
         working-directory: ./cdk
+        env:
+          AWS_REGION: eu-west-2
         run: |
-          echo "Checking CDK bootstrap status..."
-          npx cdk bootstrap aws://$(aws sts get-caller-identity --query Account --output text)/eu-west-2 || true
-          
-      - name: Deploy CDK stack
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          npx cdk bootstrap aws://$ACCOUNT_ID/$AWS_REGION || true
+
+      #  This deploy will:
+      # - Build/publish the container image to ECR using CDK's ImageAsset
+      # - Upload any file assets to S3
+      # - Deploy/Update your stack
+      - name: Deploy stack
         working-directory: ./cdk
         env:
           CDK_DEFAULT_REGION: eu-west-2
-          CDK_DEFAULT_ACCOUNT: ${{ secrets.AWS_ACCOUNT_ID }}
         run: |
-          echo "Deploying CDK stack..."
-          npx cdk deploy --require-approval never --verbose
-          echo "✅ CDK stack deployed successfully"
-          
-      - name: Output deployment information
+          npx cdk deploy DotsOcrSagemakerStack --require-approval never --verbose
+
+      - name: Show stack outputs
         run: |
-          echo "🎉 Deployment completed successfully!"
-          echo "Region: eu-west-2"
-          echo "Docker Image: ${{ steps.login-ecr.outputs.registry }}/dotsocr-vllm:${{ github.sha }}"
-          
-          # Get stack outputs
-          echo "📋 Stack Outputs:"
           aws cloudformation describe-stacks \
             --stack-name DotsOcrSagemakerStack \
             --region eu-west-2 \
             --query 'Stacks[0].Outputs[*].[OutputKey,OutputValue]' \
-            --output table || echo "Stack outputs not available yet"
+            --output table || true

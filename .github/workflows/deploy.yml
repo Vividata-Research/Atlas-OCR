@@ -63,11 +63,11 @@ jobs:
             || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
 
       # (optional) free space – comment back in if you need it
-      - name: Free disk space (fast)
-        run: |
-          mkdir -p /tmp/empty
-          sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
-          df -h
+      # - name: Free disk space (fast)
+      #   run: |
+      #     mkdir -p /tmp/empty
+      #     sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
+      #     df -h
 
       # Build & push the Docker image
       - name: Build and push Docker image

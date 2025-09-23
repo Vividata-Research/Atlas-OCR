@@ -52,19 +52,6 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // ────────────────────────────────────────────────────────────
-    // ECR repo that will store BuildKit cache (separate from CDK asset repo)
-    // ────────────────────────────────────────────────────────────
-    const cacheRepo = new ecr.Repository(this, "DotsOcrDockerCacheRepo", {
-      repositoryName: "dotsocr-build-cache",
-      imageScanOnPush: false,
-      encryption: ecr.RepositoryEncryption.KMS,
-      lifecycleRules: [
-        // keep cache lean over time (tweak to taste)
-        { tagPrefixList: ["cache"], maxImageCount: 10 },
-      ],
-    });
-    const cacheRef = `${cacheRepo.repositoryUri}:cache`;
 
     // ────────────────────────────────────────────────────────────
     // Docker image asset (CDK-managed ECR repo) + BuildKit cache in ECR
@@ -164,6 +151,5 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     new cdk.CfnOutput(this, "InputBucketName", { value: inputBucket.bucketName });
     new cdk.CfnOutput(this, "OutputBucketName", { value: outputBucket.bucketName });
     new cdk.CfnOutput(this, "DotsOcrBatchStateMachineArn", { value: batchSm.stateMachineArn });
-    new cdk.CfnOutput(this, "DockerCacheRef", { value: cacheRef });
   }
 }

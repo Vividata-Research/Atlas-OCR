@@ -1,14 +1,3 @@
-name: Deploy DotsOCR (CDK + Assets)
-
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-
-permissions:
-  id-token: write   # needed for OIDC
-  contents: read
-
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -18,7 +7,6 @@ jobs:
 
     env:
       AWS_REGION: eu-west-2
-      # 🔧 Adjust if your Dockerfile/context are elsewhere
       ECR_REPOSITORY: dotsocr
       DOCKERFILE: container/Dockerfile
       BUILD_CONTEXT: container
@@ -38,11 +26,9 @@ jobs:
         with:
           version: 10
 
-      # ✅ Buildx for caching/remote cache support
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 🔐 Assume your OIDC role (no static secrets needed)
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -54,13 +40,26 @@ jobs:
       - name: Who am I (sanity)
         run: aws sts get-caller-identity
 
-      # 🔑 Log in to Amazon ECR
       - name: Log in to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      # 🧱 Build & push Docker image with cache (explicit, like your other workflow)
-      - name: Build & push image to ECR (cached)
+      # OPTIONAL: free some disk up front (helps large builds)
+      - name: Free disk space (optional)
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf "$AGENT_TOOLSDIRECTORY" || true
+          docker system df || true
+
+      # OPTIONAL: make sure the repo exists (both the main tag and the cache tag use the same repo)
+      - name: Ensure ECR repo exists
+        run: |
+          aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" \
+            || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
+
+      # Build & push using ECR as the cache backend (no GitHub cache)
+      - name: Build & push image to ECR (ECR-backed cache)
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -68,12 +67,18 @@ jobs:
           file: ${{ env.DOCKERFILE }}
           push: true
           tags: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
-          cache-from: type=gha,scope=dotsocr
-          cache-to: type=gha,mode=max,scope=dotsocr
+          # 👇 Use ECR as cache
+          cache-from: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache
+          cache-to: type=registry,ref=${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:cache,mode=max,compression=zstd
           provenance: false
           outputs: type=registry,push=true
 
-      # Check to ensure local dependency is present
+      # Keep the runner clean so we don't hit disk full next steps / next runs
+      - name: Prune buildx cache
+        run: |
+          docker buildx prune -f
+          docker system df || true
+
       - name: Verify DotsOCR source is vendored
         run: |
           if [ ! -d "container/third_party/dots.ocr" ]; then
@@ -90,7 +95,6 @@ jobs:
         working-directory: ./cdk
         run: pnpm run build
 
-      # Safe to run every time; creates/updates the CDK bootstrap stack
       - name: Bootstrap CDK
         working-directory: ./cdk
         env:
@@ -99,7 +103,6 @@ jobs:
           ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
           npx cdk bootstrap aws://$ACCOUNT_ID/$AWS_REGION || true
 
-      # 🚀 Deploy stack (unchanged: CDK still builds its Docker asset today)
       - name: Deploy stack
         working-directory: ./cdk
         env:

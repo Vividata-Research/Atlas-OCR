@@ -64,13 +64,13 @@ jobs:
             || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
 
       # Optional: reclaim space to avoid ENOSPC during big builds
-      - name: Free disk space (fast)
-        run: |
-          mkdir -p /tmp/empty
-          sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
-          sudo rsync -a --delete /tmp/empty/ /usr/share/dotnet/ || true
-          df -h
-          docker system df || true
+      # - name: Free disk space (fast)
+      #   run: |
+      #     mkdir -p /tmp/empty
+      #     sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
+      #     sudo rsync -a --delete /tmp/empty/ /usr/share/dotnet/ || true
+      #     df -h
+      #     docker system df || true
 
       # Build & push the Docker image explicitly
       - name: Build and push Docker image

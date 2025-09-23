@@ -56,9 +56,9 @@ jobs:
       # # Optional: reclaim space to avoid ENOSPC during big builds
       - name: Free disk space (fast)
         run: |
-          mkdir -p /empty
-          sudo rsync -a --delete /empty/ /usr/local/lib/android/ || true
-          sudo rsync -a --delete /empty/ /usr/share/dotnet/ || true
+          mkdir -p /tmp/empty
+          sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
+          sudo rsync -a --delete /tmp/empty/ /usr/share/dotnet/ || true
           df -h
           docker system df || true
 

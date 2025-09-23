@@ -54,13 +54,13 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       # # Optional: reclaim space to avoid ENOSPC during big builds
-      # - name: Free disk space (optional)
-      #   run: |
-      #     sudo rm -rf /usr/local/lib/android || true
-      #     sudo rm -rf /usr/share/dotnet || true
-      #     sudo rm -rf /opt/hostedtoolcache || true
-      #     df -h
-      #     docker system df || true
+      - name: Free disk space (fast)
+        run: |
+          mkdir -p /empty
+          sudo rsync -a --delete /empty/ /usr/local/lib/android/ || true
+          sudo rsync -a --delete /empty/ /usr/share/dotnet/ || true
+          df -h
+          docker system df || true
 
       - name: Verify DotsOCR source is vendored
         run: |

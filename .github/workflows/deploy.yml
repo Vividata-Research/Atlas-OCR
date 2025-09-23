@@ -1,3 +1,14 @@
+name: Deploy DotsOCR (CDK + Assets)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  id-token: write   # needed for OIDC
+  contents: read
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

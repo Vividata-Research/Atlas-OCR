@@ -47,14 +47,14 @@ jobs:
         run: aws sts get-caller-identity
 
 
-      # # Optional: reclaim space to avoid ENOSPC during big builds
-      # - name: Free disk space (optional)
-      #   run: |
-      #     sudo rm -rf /usr/local/lib/android || true
-      #     sudo rm -rf /usr/share/dotnet || true
-      #     sudo rm -rf /opt/hostedtoolcache || true
-      #     df -h
-      #     docker system df || true
+      # Optional: reclaim space to avoid ENOSPC during big builds
+      - name: Free disk space (optional)
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          df -h
+          docker system df || true
 
       - name: Verify DotsOCR source is vendored
         run: |

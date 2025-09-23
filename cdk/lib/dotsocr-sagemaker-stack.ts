@@ -3,6 +3,7 @@ import { Construct } from "constructs";
 import * as sagemaker from "aws-cdk-lib/aws-sagemaker";
 import * as iam from "aws-cdk-lib/aws-iam";
 import * as s3 from "aws-cdk-lib/aws-s3";
+import * as ecr from "aws-cdk-lib/aws-ecr";
 import * as path from "path";
 import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
 import { createDotsOcrBatchStateMachine } from "../helpers/dotsOcrBatch";
@@ -52,12 +53,31 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     });
 
     // ────────────────────────────────────────────────────────────
-    // Build Docker image from repo root (one level up from cdk/)
+    // ECR repo that will store BuildKit cache (separate from CDK asset repo)
+    // ────────────────────────────────────────────────────────────
+    const cacheRepo = new ecr.Repository(this, "DotsOcrDockerCacheRepo", {
+      repositoryName: "dotsocr-build-cache",
+      imageScanOnPush: false,
+      encryption: ecr.RepositoryEncryption.KMS,
+      lifecycleRules: [
+        // keep cache lean over time (tweak to taste)
+        { tagPrefixList: ["cache"], maxImageCount: 10 },
+      ],
+    });
+    const cacheRef = `${cacheRepo.repositoryUri}:cache`;
+
+    // ────────────────────────────────────────────────────────────
+    // Docker image asset (CDK-managed ECR repo) + BuildKit cache in ECR
     // ────────────────────────────────────────────────────────────
     const imageAsset = new DockerImageAsset(this, "DotsOcrImage", {
-      directory: path.join(__dirname, "../../container"), 
+      directory: path.join(__dirname, "../../container"),
       platform: Platform.LINUX_AMD64,
+
+      // Enable remote cache so CI runners can reuse layers across runs
+      cacheFrom: [{ type: "registry", params: { ref: cacheRef } }],
+      cacheTo: { type: "registry", params: { ref: cacheRef, mode: "max", compression: "zstd" } },
     });
+
     // ────────────────────────────────────────────────────────────
     // SageMaker execution role (used BY the container at runtime)
     // ────────────────────────────────────────────────────────────
@@ -131,13 +151,12 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
       },
     });
 
-
     // Build the Step Functions state machine that runs Batch Transform on this model
     const batchSm = createDotsOcrBatchStateMachine(this, "DotsOcrBatch", {
       modelName: model.attrModelName,
       inputBucket: inputBucket.bucketName,
       outputBucket: outputBucket.bucketName,
-      jobNameBase: props.dependencies.modelName, 
+      jobNameBase: props.dependencies.modelName,
     });
 
     // ────────────────────────────────────────────────────────────
@@ -148,6 +167,7 @@ export class DotsOcrSagemakerStack extends cdk.Stack {
     new cdk.CfnOutput(this, "ModelBucketName", { value: modelBucket.bucketName });
     new cdk.CfnOutput(this, "InputBucketName", { value: inputBucket.bucketName });
     new cdk.CfnOutput(this, "OutputBucketName", { value: outputBucket.bucketName });
-    new cdk.CfnOutput(this, "DotsOcrBatchStateMachineArn", {value: batchSm.stateMachineArn});
+    new cdk.CfnOutput(this, "DotsOcrBatchStateMachineArn", { value: batchSm.stateMachineArn });
+    new cdk.CfnOutput(this, "DockerCacheRef", { value: cacheRef });
   }
 }

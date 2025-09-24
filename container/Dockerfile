@@ -1,5 +1,5 @@
 # Match the project’s guidance (CUDA/Torch/vLLM already aligned)
-FROM vllm/vllm-openai:v0.9.1
+FROM 597088029880.dkr.ecr.eu-west-2.amazonaws.com/docker/vllm/vllm-openai:v0.9.1
 
 # Minimal extras (no venv)
 RUN apt-get update && apt-get install -y --no-install-recommends \

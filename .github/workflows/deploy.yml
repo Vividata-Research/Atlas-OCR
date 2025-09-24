@@ -47,6 +47,16 @@ jobs:
       - name: Who am I (sanity)
         run: aws sts get-caller-identity
 
+      # Optional: reclaim space to avoid ENOSPC during big builds
+      - name: Free disk space (optional)
+        run: |
+          mkdir -p /tmp/empty
+          sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/hostedtoolcache || true
+          df -h
+
       # ⚡ Buildx with docker-container driver (needed for cache backends)
       - name: Set up Docker Buildx
         id: buildx

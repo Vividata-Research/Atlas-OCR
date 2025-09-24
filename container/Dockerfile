@@ -1,5 +1,6 @@
-# Match the project’s guidance (CUDA/Torch/vLLM already aligned)
-FROM 597088029880.dkr.ecr.eu-west-2.amazonaws.com/docker/vllm/vllm-openai:v0.9.1
+# Let CI pass the full base reference; keep a sensible local default.
+ARG BASE_IMAGE=docker.io/vllm/vllm-openai:v0.9.1
+FROM ${BASE_IMAGE}
 
 # Minimal extras (no venv)
 RUN apt-get update && apt-get install -y --no-install-recommends \

@@ -13,7 +13,6 @@ env:
   AWS_REGION: eu-west-2
   ECR_REPOSITORY: dotsocr
   DOCKER_BUILDKIT: 1
-  # Reproducible build timestamp: 24 Sep 2025 00:00:00 UTC
   SOURCE_DATE_EPOCH: 1758672000
 
 jobs:
@@ -37,7 +36,7 @@ jobs:
         with:
           version: 10
 
-      # 🔐 OIDC to AWS
+      # OIDC to AWS
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -49,7 +48,7 @@ jobs:
       - name: Who am I (sanity)
         run: aws sts get-caller-identity
 
-      # 👀 Only build if Docker context changed
+      # Only build if Docker context changed
       - name: Detect Docker context changes
         id: changes
         uses: dorny/paths-filter@v3
@@ -106,6 +105,7 @@ jobs:
           build-args: |
             BUILDKIT_INLINE_CACHE=1
             SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
+            BASE_IMAGE=${{ steps.ecr.outputs.registry }}/docker/vllm/vllm-openai:v0.9.1
           tags: |
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           cache-from: |

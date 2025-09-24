@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
-#comment
+
 permissions:
   id-token: write
   contents: read
@@ -13,6 +13,8 @@ env:
   AWS_REGION: eu-west-2
   ECR_REPOSITORY: dotsocr
   DOCKER_BUILDKIT: 1
+  # Reproducible build timestamp: 24 Sep 2025 00:00:00 UTC
+  SOURCE_DATE_EPOCH: 1758672000
 
 jobs:
   deploy:
@@ -47,8 +49,18 @@ jobs:
       - name: Who am I (sanity)
         run: aws sts get-caller-identity
 
-      # Optional: reclaim space to avoid ENOSPC during big builds
+      # 👀 Only build if Docker context changed
+      - name: Detect Docker context changes
+        id: changes
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            docker:
+              - 'container/**'
+
+      # Optional: reclaim space ONLY when we're going to build
       - name: Free disk space (optional)
+        if: steps.changes.outputs.docker == 'true'
         run: |
           mkdir -p /tmp/empty
           sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
@@ -79,8 +91,9 @@ jobs:
           aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 \
             || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
 
-      # Build & push with GitHub Actions cache (no pre-warm)
+      # Build & push with GitHub Actions cache (only when Docker context changed)
       - name: Build and push Docker image
+        if: steps.changes.outputs.docker == 'true'
         id: build
         uses: docker/build-push-action@v5
         with:
@@ -92,6 +105,7 @@ jobs:
           pull: false
           build-args: |
             BUILDKIT_INLINE_CACHE=1
+            SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }}
           tags: |
             ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           cache-from: |
@@ -99,12 +113,55 @@ jobs:
           cache-to: |
             type=gha,mode=max,scope=dotsocr-build
 
-      - name: Export image URI (digest)
+      # If we built, export the new digest and prune old images
+      - name: Export image URI (digest) — from build
+        if: steps.changes.outputs.docker == 'true'
         run: |
-          DIGEST="${{ steps.build.outputs.digest }}"
+          DIGEST="${{ steps.build.outputs.digest }}"   # e.g. sha256:abc...
           IMAGE="${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${DIGEST}"
           echo "DOCKER_IMAGE_URI=$IMAGE" >> $GITHUB_ENV
-          echo "📌 Using immutable image $IMAGE"
+          echo "📌 Using immutable image (new build): $IMAGE"
+
+      - name: Prune old images in ECR (keep only the new digest)
+        if: steps.changes.outputs.docker == 'true'
+        env:
+          CUR_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          REPO="${{ env.ECR_REPOSITORY }}"
+          # Collect all other digests in the repo (excluding the one we just pushed)
+          OTHER_DIGESTS=$(aws ecr describe-images \
+            --repository-name "$REPO" \
+            --query "imageDetails[?imageDigest!='${CUR_DIGEST}'].imageDigest" \
+            --output text)
+
+          if [ -n "$OTHER_DIGESTS" ]; then
+            echo "🧹 Deleting old images in $REPO..."
+            ARGS=""
+            for d in $OTHER_DIGESTS; do
+              ARGS="$ARGS imageDigest=$d"
+            done
+            # Batch-delete (ignore failure if some are already gone)
+            aws ecr batch-delete-image --repository-name "$REPO" --image-ids $ARGS || true
+          else
+            echo "Nothing to prune."
+          fi
+
+      # If we didn't build, reuse current :latest digest from ECR
+      - name: Export image URI (digest) — reuse existing :latest
+        if: steps.changes.outputs.docker != 'true'
+        run: |
+          DIGEST=$(aws ecr describe-images \
+            --repository-name "${{ env.ECR_REPOSITORY }}" \
+            --image-ids imageTag=latest \
+            --query 'imageDetails[0].imageDigest' \
+            --output text)
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "None" ]; then
+            echo "❌ No :latest image found in ECR; nothing to deploy."
+            exit 1
+          fi
+          IMAGE="${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${DIGEST}"
+          echo "DOCKER_IMAGE_URI=$IMAGE" >> $GITHUB_ENV
+          echo "📌 Using immutable image (reused): $IMAGE"
 
       - name: Verify DotsOCR source is vendored
         run: |

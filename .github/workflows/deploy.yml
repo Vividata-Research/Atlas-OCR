@@ -50,32 +50,22 @@ jobs:
           echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
           echo "✅ Running as $ACCOUNT_ID in ${{ env.AWS_REGION }}"
 
-      # ⚡ Buildx so caching works
+      # ⚡ Buildx with container driver (required for cache-to/from)
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          install: true
 
       - name: Log in to Amazon ECR
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Ensure ECR repo exists (app repo for your image + cache tag)
+      - name: Ensure ECR repo exists (app repo for your image)
         run: |
           aws ecr describe-repositories --repository-names "${{ env.ECR_REPOSITORY }}" >/dev/null 2>&1 \
             || aws ecr create-repository --repository-name "${{ env.ECR_REPOSITORY }}" >/dev/null
 
-      # (optional) free space – uncomment if you hit disk limits
-      # - name: Free disk space (fast)
-      #   run: |
-      #     mkdir -p /tmp/empty
-      #     sudo rsync -a --delete /tmp/empty/ /usr/local/lib/android/ || true
-      #     df -h
-
-      # Pre-warm the PTC base so failures are obvious early (non-fatal if first seed)
-      - name: Pre-warm base (PTC)
-        continue-on-error: true
-        run: |
-          docker pull ${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/docker/vllm/vllm-openai:v0.9.1
-
-      # Build & push + robust layer caching
+      # Build & push — GHA cache only (no pre-warm, no registry cache)
       - name: Build and push Docker image
         id: build
         uses: docker/build-push-action@v5
@@ -85,16 +75,15 @@ jobs:
           builder: default
           push: true
           provenance: false
-          pull: false                        # don't refresh base unless needed
+          pull: false
           build-args: |
             BUILDKIT_INLINE_CACHE=1
           tags: |
             ${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
           cache-from: |
-            type=registry,ref=${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
-            type=registry,ref=${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:cache
+            type=gha,scope=dotsocr-build
           cache-to: |
-            type=registry,ref=${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:cache,mode=max,compression=zstd
+            type=gha,mode=max,scope=dotsocr-build
 
       - name: Export image URI (digest)
         run: |

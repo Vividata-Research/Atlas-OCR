@@ -44,11 +44,8 @@ jobs:
           audience: sts.amazonaws.com
           role-session-name: gha-${{ github.run_id }}
 
-      - name: Who am I (sanity + export account ID)
-        run: |
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "AWS_ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
-          echo "✅ Running as $ACCOUNT_ID in ${{ env.AWS_REGION }}"
+      - name: Who am I (sanity)
+        run: aws sts get-caller-identity
 
       # ⚡ Buildx with docker-container driver (needed for cache backends)
       - name: Set up Docker Buildx
@@ -57,7 +54,6 @@ jobs:
         with:
           driver: docker-container
           install: true
-          # (optional) pick a stable buildkit image
           driver-opts: |
             image=moby/buildkit:buildx-stable-1
 
@@ -65,6 +61,7 @@ jobs:
         run: docker buildx inspect ${{ steps.buildx.outputs.name }} --bootstrap
 
       - name: Log in to Amazon ECR
+        id: ecr
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Ensure ECR repo exists (app repo for your image)
@@ -79,14 +76,14 @@ jobs:
         with:
           context: ./container
           file: ./container/Dockerfile
-          builder: ${{ steps.buildx.outputs.name }}    # << use the container driver builder
+          builder: ${{ steps.buildx.outputs.name }}    # use container driver builder
           push: true
           provenance: false
           pull: false
           build-args: |
             BUILDKIT_INLINE_CACHE=1
           tags: |
-            ${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+            ${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:latest
           cache-from: |
             type=gha,scope=dotsocr-build
           cache-to: |
@@ -95,7 +92,7 @@ jobs:
       - name: Export image URI (digest)
         run: |
           DIGEST="${{ steps.build.outputs.digest }}"
-          IMAGE="${AWS_ACCOUNT_ID}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}@${DIGEST}"
+          IMAGE="${{ steps.ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}@${DIGEST}"
           echo "DOCKER_IMAGE_URI=$IMAGE" >> $GITHUB_ENV
           echo "📌 Using immutable image $IMAGE"
 
@@ -120,7 +117,8 @@ jobs:
         env:
           AWS_REGION: ${{ env.AWS_REGION }}
         run: |
-          npx cdk bootstrap aws://$AWS_ACCOUNT_ID/$AWS_REGION || true
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          npx cdk bootstrap aws://$ACCOUNT_ID/$AWS_REGION || true
 
       - name: Deploy stack (CDK uses prebuilt image)
         working-directory: ./cdk

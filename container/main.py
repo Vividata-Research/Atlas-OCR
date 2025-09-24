@@ -203,7 +203,7 @@ def invocations():
     else:
         raw = request.get_data(cache=False, as_text=False)
         if not raw:
-            return jsonify({"error": "Empty request body"}), 400
+            return jsonify({"error": "Empty request body."}), 400
         # Optional: header overrides for manual testing
         _apply_overrides_from_headers(options)
 

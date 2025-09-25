@@ -81,3 +81,5 @@ checkpoints/
 .gitattributes
 
 sample.pdf
+dots_ocr_env/
+weights/

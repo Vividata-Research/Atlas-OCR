@@ -38,6 +38,8 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 COPY main.py /app/
 COPY start_vllm.sh /app/
 COPY serve /app/
+# Copy post-processing utility
+COPY postprocess_dotsocr.py /app/postprocess_dotsocr.py
 RUN chmod +x /app/start_vllm.sh /app/serve
 
 # --- Bring in the local dots.ocr repo (repo root with setup.py), then editable-install ---

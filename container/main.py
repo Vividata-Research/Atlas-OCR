@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import base64
+import glob
 import os
+import shutil
 import tempfile
 import time
 import urllib.parse
@@ -10,13 +12,13 @@ import requests
 from asgiref.wsgi import WsgiToAsgi
 from flask import Flask, Response, jsonify, request
 
-# Use the class provided by the repo
+# DotsOCR parser from the repo
 from dots_ocr.parser import DotsOCRParser
 
 app = Flask(__name__)
 
-# ---- CLI flags (optional) ----
-parser = argparse.ArgumentParser(description="DotsOCR vLLM API Server (SageMaker-managed)")
+# ---------------- CLI flags (minimal; works local + SageMaker) ----------------
+parser = argparse.ArgumentParser(description="DotsOCR vLLM API Server")
 parser.add_argument(
     "--vllm-api",
     type=str,
@@ -27,7 +29,7 @@ parser.add_argument("--host", type=str, default="0.0.0.0", help="Bind address")
 parser.add_argument("--port", type=int, default=8080, help="Bind port")
 args, _ = parser.parse_known_args()
 
-# ---- Health ----
+# ---------------- Health ----------------
 VLLM_HEALTH_URL = f"{args.vllm_api.rstrip('/')}/health"
 HEALTH_TIMEOUT_S = float(os.getenv("HEALTH_CHECK_TIMEOUT", "30"))
 
@@ -54,7 +56,7 @@ def health() -> Response:
     return jsonify({"status": "unhealthy", "vllm": "not ready"}), 503
 
 
-# ---- Helpers ----
+# ---------------- Helpers ----------------
 def _suffix_for_bytes(b: bytes) -> str:
     """Guess a file suffix from magic bytes (fallback .pdf)."""
     try:
@@ -84,7 +86,6 @@ def _env_default(name: str, default):
     v = os.getenv(name)
     if v is None:
         return default
-    # Coerce to the right type if default is numeric
     try:
         if isinstance(default, int):
             return int(v)
@@ -105,11 +106,11 @@ def _default_options():
         "model_name": "model",
         "prompt": _env_default("DOTSOCR_PROMPT", "prompt_layout_all_en"),
         "dpi": _env_default("DOTSOCR_DPI", 120),
-        "num_thread": _env_default("DOTSOCR_THREADS", 1),  # parser expects num_thread
+        "num_thread": _env_default("DOTSOCR_THREADS", 1),
         "temperature": _env_default("DOTSOCR_TEMPERATURE", 0.1),
         "top_p": _env_default("DOTSOCR_TOP_P", 0.9),
         "max_completion_tokens": _env_default("DOTSOCR_MAX_TOKENS", 4096),
-        # optional flags you might expose later:
+        # Optional future flags:
         # "fitz_preprocess": not _env_default("DOTSOCR_NO_FITZ_PREPROCESS", False),
         # "min_pixels": _env_default("DOTSOCR_MIN_PIXELS", None),
         # "max_pixels": _env_default("DOTSOCR_MAX_PIXELS", None),
@@ -117,7 +118,6 @@ def _default_options():
 
 
 def _apply_overrides_from_json(options: dict, body: dict) -> None:
-    # Optional overrides from JSON body
     if "prompt" in body:
         options["prompt"] = str(body.get("prompt"))
     if "dpi" in body:
@@ -130,17 +130,11 @@ def _apply_overrides_from_json(options: dict, body: dict) -> None:
         options["top_p"] = float(body.get("top_p"))
     if "max_tokens" in body:
         options["max_completion_tokens"] = int(body.get("max_tokens"))
-    # Uncomment if you wish to allow these via JSON:
+    # Optional:
     # options["fitz_preprocess"] = not bool(body.get("no_fitz_preprocess", False))
-    # if "min_pixels" in body: options["min_pixels"] = int(body["min_pixels"])
-    # if "max_pixels" in body: options["max_pixels"] = int(body["max_pixels"])
 
 
 def _apply_overrides_from_headers(options: dict) -> None:
-    """
-    Allow safe header-based overrides (mostly useful for manual testing;
-    SageMaker Batch Transform generally won't set these per object).
-    """
     h = request.headers
     if "X-DotsOCR-Prompt" in h:
         options["prompt"] = h.get("X-DotsOCR-Prompt")
@@ -172,7 +166,6 @@ def _apply_overrides_from_headers(options: dict) -> None:
 
 
 def _build_parser_from_options(options: dict) -> DotsOCRParser:
-    """Instantiate DotsOCRParser using our merged options."""
     return DotsOCRParser(
         ip=options["ip"],
         port=options["port"],
@@ -182,14 +175,44 @@ def _build_parser_from_options(options: dict) -> DotsOCRParser:
         max_completion_tokens=options["max_completion_tokens"],
         num_thread=options["num_thread"],
         dpi=options["dpi"],
-        output_dir="./output",
+        output_dir="/app/output",  # inside container; volume-mount this on host
         min_pixels=options.get("min_pixels"),
         max_pixels=options.get("max_pixels"),
         use_hf=False,
     )
 
 
-# ---- Inference ----
+def _cleanup_jsonl_and_intermediates(output_root: str):
+    """
+    Remove any *.jsonl files and known intermediate folders under /app/output.
+    Safe no-op if paths don't exist.
+    """
+    try:
+        # Remove jsonl anywhere under output root (including output_consolidated)
+        for p in glob.glob(os.path.join(output_root, "**", "*.jsonl"), recursive=True):
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+        # Also remove any top-level temporary parse folders that start with 'tmp'
+        for p in glob.glob(os.path.join(output_root, "tmp*")):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+            except Exception:
+                pass
+        # Remove empty output_consolidated if it exists
+        oc_dir = os.path.join(output_root, "output_consolidated")
+        try:
+            # If it's empty after moves, remove it
+            if os.path.isdir(oc_dir) and not os.listdir(oc_dir):
+                os.rmdir(oc_dir)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+# ---------------- Inference ----------------
 @app.post("/invocations")
 def invocations():
     """
@@ -198,15 +221,16 @@ def invocations():
          Content-Type: application/json
       2) Raw bytes (PDF/JPG/PNG/TIFF):
          Content-Type: application/octet-stream (or application/pdf, image/*)
+
+    Returns JSON with:
+      - result: per-page outputs (from parser)
+      - final_dir: /app/output/final/<doc_id>
+      - final_md:  /app/output/final/<doc_id>/document.md
     """
     ct = (request.headers.get("Content-Type") or "").lower().split(";")[0].strip()
-
-    # Prepare options (allow JSON or headers to override defaults)
     options = _default_options()
 
-    raw: bytes
-
-    # Mode 1: JSON with base64
+    # ---- Read body (JSON base64 or raw bytes)
     if ct == "application/json":
         body = request.get_json(silent=True)
         if not body:
@@ -221,38 +245,100 @@ def invocations():
             )
         except Exception:
             return jsonify({"error": "file_data must be base64 string"}), 400
-
         _apply_overrides_from_json(options, body)
-
-    # Mode 2: raw bytes (Batch Transform with splitType=None, or manual curl)
     else:
         raw = request.get_data(cache=False, as_text=False)
         if not raw:
             return jsonify({"error": "Empty request body."}), 400
-        # Optional: header overrides for manual testing
         _apply_overrides_from_headers(options)
 
-    # Write to temp file and run the parser
+    # ---- Persist input to a temp file
     src_path = _save_temp_file(raw)
+    doc_id = os.path.splitext(os.path.basename(src_path))[0]  # e.g., tmpabc123
+
+    final_dir = None
+    final_md = None
+
     try:
+        # ---- Run DotsOCR
         parser_obj = _build_parser_from_options(options)
         result = parser_obj.parse_file(
             src_path,
             prompt_mode=options.get("prompt", "prompt_layout_all_en"),
             bbox=options.get("bbox"),
-            # If you later add "fitz_preprocess" to options/env, pass here:
             fitz_preprocess=options.get("fitz_preprocess", False),
         )
+
+        # ---- Always run postprocess to consolidate Markdown
+        first = (result or [])[0] if isinstance(result, list) and result else None
+        md_path = first.get("md_content_path") if isinstance(first, dict) else None
+
+        output_root = "/app/output"
+        os.makedirs(output_root, exist_ok=True)
+
+        if md_path:
+            # 1) Consolidate pages into ./output_consolidated/<doc_id>/*
+            from postprocess_dotsocr import process_dotsocr_output
+
+            input_dir = os.path.dirname(md_path)  # e.g., /app/output/tmpXYZ
+            old_cwd = os.getcwd()
+            try:
+                os.chdir(output_root)
+                rel_input_dir = os.path.relpath(input_dir, output_root)
+                process_dotsocr_output(rel_input_dir)
+                consolidated_dir = os.path.join(
+                    output_root, "output_consolidated", os.path.basename(rel_input_dir)
+                )
+                consolidated_md = os.path.join(
+                    consolidated_dir,
+                    f"{os.path.basename(rel_input_dir)}_consolidated.md",
+                )
+            finally:
+                os.chdir(old_cwd)
+
+            # 2) Move final artifacts to stable place and delete intermediates
+            final_dir = os.path.join(output_root, "final", doc_id)
+            final_assets = os.path.join(final_dir, "assets")
+            assets_src = os.path.join(consolidated_dir, "assets")
+
+            shutil.rmtree(final_dir, ignore_errors=True)
+            os.makedirs(final_assets, exist_ok=True)
+
+            if os.path.isfile(consolidated_md):
+                final_md = os.path.join(final_dir, "document.md")
+                shutil.copy2(consolidated_md, final_md)
+
+            if os.path.isdir(assets_src):
+                for name in os.listdir(assets_src):
+                    src_fp = os.path.join(assets_src, name)
+                    if os.path.isfile(src_fp):
+                        shutil.copy2(src_fp, os.path.join(final_assets, name))
+
+            # Remove the consolidated working folder (intermediate)
+            shutil.rmtree(consolidated_dir, ignore_errors=True)
+
+        # 3) Remove any residual *.jsonl or tmp dirs anywhere under /app/output
+        _cleanup_jsonl_and_intermediates(output_root)
+
         return jsonify(
             {
                 "object": "ocr.completion",
                 "model": "DotsOCR",
                 "created": int(time.time()),
                 "result": result,
+                "final_dir": final_dir,
+                "final_md": final_md,
             }
         )
+
     except Exception as e:
+        # Best-effort cleanup of residual jsonl/intermediates even on error
+        try:
+            _cleanup_jsonl_and_intermediates("/app/output")
+        except Exception:
+            pass
         return jsonify({"error": f"OCR failed: {e}"}), 500
+
     finally:
         try:
             os.unlink(src_path)
@@ -260,7 +346,7 @@ def invocations():
             pass
 
 
-# ---- ASGI wrapper for uvicorn (serve script) ----
+# ---------------- ASGI wrapper ----------------
 asgi_app = WsgiToAsgi(app)
 
 if __name__ == "__main__":

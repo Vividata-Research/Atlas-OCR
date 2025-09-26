@@ -3,8 +3,9 @@ ARG BASE_IMAGE=docker.io/vllm/vllm-openai:v0.9.1
 FROM ${BASE_IMAGE}
 
 # Minimal extras (no venv)
+# (Add iproute2 so 'ss' is available for the optional port pre-check.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl ca-certificates \
+    curl ca-certificates iproute2 \
  && rm -rf /var/lib/apt/lists/*
 
 # --- Runtime env ---

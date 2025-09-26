@@ -10,7 +10,8 @@ import requests
 from asgiref.wsgi import WsgiToAsgi
 from flask import Flask, Response, jsonify, request
 
-from dots_ocr.parser import process_document
+# Use the class provided by the repo
+from dots_ocr.parser import DotsOCRParser
 
 app = Flask(__name__)
 
@@ -104,10 +105,14 @@ def _default_options():
         "model_name": "model",
         "prompt": _env_default("DOTSOCR_PROMPT", "prompt_layout_all_en"),
         "dpi": _env_default("DOTSOCR_DPI", 120),
-        "num_thread": _env_default("DOTSOCR_THREADS", 1),
+        "num_thread": _env_default("DOTSOCR_THREADS", 1),  # parser expects num_thread
         "temperature": _env_default("DOTSOCR_TEMPERATURE", 0.1),
         "top_p": _env_default("DOTSOCR_TOP_P", 0.9),
         "max_completion_tokens": _env_default("DOTSOCR_MAX_TOKENS", 4096),
+        # optional flags you might expose later:
+        # "fitz_preprocess": not _env_default("DOTSOCR_NO_FITZ_PREPROCESS", False),
+        # "min_pixels": _env_default("DOTSOCR_MIN_PIXELS", None),
+        # "max_pixels": _env_default("DOTSOCR_MAX_PIXELS", None),
     }
 
 
@@ -125,8 +130,10 @@ def _apply_overrides_from_json(options: dict, body: dict) -> None:
         options["top_p"] = float(body.get("top_p"))
     if "max_tokens" in body:
         options["max_completion_tokens"] = int(body.get("max_tokens"))
-    # Leave room for optional parser flags if you expose them:
-    # e.g., options["no_fitz_preprocess"] = bool(body.get("no_fitz_preprocess", False))
+    # Uncomment if you wish to allow these via JSON:
+    # options["fitz_preprocess"] = not bool(body.get("no_fitz_preprocess", False))
+    # if "min_pixels" in body: options["min_pixels"] = int(body["min_pixels"])
+    # if "max_pixels" in body: options["max_pixels"] = int(body["max_pixels"])
 
 
 def _apply_overrides_from_headers(options: dict) -> None:
@@ -162,6 +169,24 @@ def _apply_overrides_from_headers(options: dict) -> None:
             options["max_completion_tokens"] = int(h.get("X-DotsOCR-MaxTokens"))
         except Exception:
             pass
+
+
+def _build_parser_from_options(options: dict) -> DotsOCRParser:
+    """Instantiate DotsOCRParser using our merged options."""
+    return DotsOCRParser(
+        ip=options["ip"],
+        port=options["port"],
+        model_name=options["model_name"],
+        temperature=options["temperature"],
+        top_p=options["top_p"],
+        max_completion_tokens=options["max_completion_tokens"],
+        num_thread=options["num_thread"],
+        dpi=options["dpi"],
+        output_dir="./output",
+        min_pixels=options.get("min_pixels"),
+        max_pixels=options.get("max_pixels"),
+        use_hf=False,
+    )
 
 
 # ---- Inference ----
@@ -210,7 +235,14 @@ def invocations():
     # Write to temp file and run the parser
     src_path = _save_temp_file(raw)
     try:
-        result = process_document(src_path, options)
+        parser_obj = _build_parser_from_options(options)
+        result = parser_obj.parse_file(
+            src_path,
+            prompt_mode=options.get("prompt", "prompt_layout_all_en"),
+            bbox=options.get("bbox"),
+            # If you later add "fitz_preprocess" to options/env, pass here:
+            fitz_preprocess=options.get("fitz_preprocess", False),
+        )
         return jsonify(
             {
                 "object": "ocr.completion",

@@ -83,3 +83,5 @@ checkpoints/
 sample.pdf
 dots_ocr_env/
 weights/
+input_data/
+output_data/
